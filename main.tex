@@ -1,0 +1,556 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{float}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black
+}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small Interest Rate Modeling}
+\lhead{\small Ecole Centrale Marseille}
+\cfoot{\thepage}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\diff}{\mathrm{d}}
+
+\begin{document}
+
+% ===== TITLE PAGE =====
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\LARGE\bfseries Hull-White Calibration and\\[0.3em]Multi-Measure Valuation\par}
+\vspace{0.8cm}
+{\large\itshape Interest Rate Modeling Project\par}
+\vspace{3cm}
+{\large Ecole Centrale Marseille\par}
+\vspace{0.4cm}
+{\normalsize Pauline DUMAS, Artouch VARDANYAN --- March 2026\par}
+\vspace{3cm}
+\begin{abstract}
+\noindent
+This report presents the calibration and application of the one-factor Hull-White model for pricing a European payer swaption. We estimate the historical parameters $(a, \sigma)$ from \texteuro STR data using two methods (AR(1) regression and exact MLE), fit the initial yield curve via Nelson-Siegel-Svensson (NSS), and price the swaption under three distinct probability measures ($\Q$, $\Q^T$, $\Q^A$) using Monte Carlo simulation. We then implement a recombining trinomial tree following Hull \& White (1993) and compare the results, analyze convergence, and study the sensitivity to the mean-reversion parameter. All methods converge to a consistent swaption price near $0.0990$ per unit notional.
+\end{abstract}
+\end{titlepage}
+
+\tableofcontents
+
+% ===== SECTION 1 =====
+\section{Calibration Strategy}
+
+\subsection{Model Overview}
+
+The one-factor Hull-White model describes the short rate $r_t$ under the risk-neutral measure $\Q$ as:
+\begin{equation}
+\diff r_t = (\theta(t) - a\, r_t)\,\diff t + \sigma\, \diff W_t^{\Q}
+\end{equation}
+where $a > 0$ is the mean-reversion speed, $\sigma > 0$ the volatility, and $\theta(t)$ a deterministic function chosen so that the model exactly fits the initial yield curve. This is a time-inhomogeneous Ornstein-Uhlenbeck (OU) process.
+
+The calibration has two separate steps. First, we estimate $a$ and $\sigma$ from historical short-rate data under the real-world measure $P$, assuming they are the same under both measures. Then, independently, we determine $\theta(t)$ from the current market yield curve under $\Q$. In other words, historical data is only used to pin down $a$ and $\sigma$; the pricing drift is entirely driven by $\theta(t)$.
+
+\subsection{Historical Parameter Estimation}
+
+\subsubsection{Data}
+
+We use daily \texteuro STR (Euro Short-Term Rate) data from the ECB data portal, covering October 1, 2019 to February 19, 2026, giving $n = 1637$ observations with average time step $\Delta t \approx 0.0039$ years.
+
+\subsubsection{AR(1) Regression Approach}
+
+The exact discretization of the OU process over one step $\Delta t$ gives:
+\begin{equation}
+r_{t+\Delta t} = \underbrace{b(1-e^{-a\Delta t})}_{\alpha} + \underbrace{e^{-a\Delta t}}_{\beta}\,r_t + \varepsilon_t, \quad \varepsilon_t \sim \mathcal{N}\!\left(0,\, \frac{\sigma^2}{2a}(1-e^{-2a\Delta t})\right)
+\end{equation}
+This is an AR(1) regression in $(\hat{\alpha}, \hat{\beta})$. We fit it by OLS, then recover the structural parameters using the exact inversion formulas:
+\begin{equation}
+\hat{a} = -\frac{\ln\hat{\beta}}{\Delta t}, \quad \hat{b} = \frac{\hat{\alpha}}{1-\hat{\beta}}, \quad \hat{\sigma} = \hat{s}_\varepsilon\sqrt{\frac{2\hat{a}}{1-\hat{\beta}^2}}
+\end{equation}
+
+\begin{algorithm}[H]
+\caption{AR(1) Estimation (exact discretization)}
+\begin{algorithmic}[1]
+\State Set $y_i = r_{t_i + \Delta t}$, $X_i = (1,\, r_{t_i})$
+\State Estimate $(\hat{\alpha}, \hat{\beta}) = (X^\top X)^{-1} X^\top y$ by OLS
+\State Compute residual std $\hat{s}_\varepsilon = \mathrm{std}(\hat{\varepsilon})$
+\State $\hat{a}_{\text{AR}} \leftarrow -\ln(\hat{\beta}) / \Delta t$; \quad $\hat{b}_{\text{AR}} \leftarrow \hat{\alpha} / (1 - \hat{\beta})$; \quad $\hat{\sigma}_{\text{AR}} \leftarrow \hat{s}_\varepsilon\sqrt{2\hat{a}_{\text{AR}}/(1-\hat{\beta}^2)}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Exact Maximum Likelihood Estimation (MLE)}
+
+MLE uses the same Gaussian transition distribution, but instead of minimizing a sum of squares it maximizes the exact likelihood. Setting $\phi = e^{-a\Delta t}$, the closed-form estimators are:
+\begin{align}
+\hat{\phi} &= \frac{S_{xy} - S_x S_y / n}{S_{xx} - S_x^2 / n}, \quad
+\hat{\alpha} = \frac{S_y - \hat{\phi}\, S_x}{n(1-\hat{\phi})}, \quad
+\hat{a}_{\text{MLE}} = -\frac{\ln\hat{\phi}}{\Delta t}, \quad
+\hat{b}_{\text{MLE}} = \frac{\hat{\alpha}}{1-\hat{\phi}}
+\end{align}
+The volatility is then recovered from the residual standard deviation:
+\begin{equation}
+\hat{\sigma}_{\text{MLE}} = \hat{s}_\varepsilon \sqrt{\frac{2\hat{a}}{1 - \hat{\phi}^2}}
+\end{equation}
+
+\begin{algorithm}[H]
+\caption{Exact MLE for the OU Process}
+\begin{algorithmic}[1]
+\State Compute sufficient statistics: $S_x, S_y, S_{xx}, S_{xy}$ from the rate series
+\State $\hat{\phi} \leftarrow (S_{xy} - S_x S_y/n) / (S_{xx} - S_x^2/n)$
+\State $\hat{a}_{\text{MLE}} \leftarrow -\ln(\hat{\phi}) / \Delta t$; \quad $\hat{b}_{\text{MLE}} \leftarrow \hat{\alpha} / (1 - \hat{\phi})$
+\State Compute residuals; $\hat{\sigma}_{\text{MLE}} \leftarrow \mathrm{std}(e)\cdot\sqrt{2\hat{a}/(1-\hat{\phi}^2)}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Results and Comparison}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{AR(1)} & \textbf{MLE} \\
+\midrule
+$a$ (mean-reversion speed) & 0.13668 & 0.13672 \\
+$\sigma$ (volatility)       & 0.00670 & 0.00670 \\
+$b$ (long-run mean)         & 0.04093 & 0.04093 \\
+\bottomrule
+\end{tabular}
+\caption{Estimated parameters from \texteuro STR data (Oct.\ 2019 -- Feb.\ 2026)}
+\end{table}
+
+Both methods give virtually identical estimates. We keep the MLE parameters for the rest of the project: $a = 0.1367$, $\sigma = 0.0067$, $b = 0.0409$.
+
+\textbf{Discussion.} The two methods share the same exact OU discretization and the same inversion formulas, so numerically they agree completely — as confirmed by Table~1. The real difference is in how $(\hat{\alpha}, \hat{\beta})$ are obtained: AR(1) uses OLS, which minimizes a sum of squares without reference to the transition distribution; MLE directly maximizes the Gaussian likelihood and achieves the Cramér-Rao bound asymptotically. Both are fine here, but we prefer MLE on statistical grounds.
+
+\subsection{Term Structure Fitting: Nelson-Siegel-Svensson}
+
+\subsubsection{Market Data}
+
+We use the ECB AAA-rated yield curve (\texttt{G\_N\_A}) as of March 5, 2026, on 16 maturities from 3 months to 30 years.
+
+\subsubsection{The NSS Model}
+
+The NSS model parameterizes the spot rate $z(0,T)$ as:
+\begin{equation}
+z^{\text{NSS}}(T) = \beta_0 + \beta_1 \frac{1-e^{-T/\tau_1}}{T/\tau_1} + \beta_2\!\left(\frac{1-e^{-T/\tau_1}}{T/\tau_1} - e^{-T/\tau_1}\right) + \beta_3\!\left(\frac{1-e^{-T/\tau_2}}{T/\tau_2} - e^{-T/\tau_2}\right)
+\end{equation}
+The instantaneous market forward rate $f^M(0,T)$ follows analytically:
+\begin{equation}
+f^M(0,T) = \beta_0 + \beta_1 e^{-T/\tau_1} + \beta_2 \frac{T}{\tau_1} e^{-T/\tau_1} + \beta_3 \frac{T}{\tau_2} e^{-T/\tau_2}
+\end{equation}
+To avoid local minima, calibration uses a grid search over $(\tau_1, \tau_2)$ starting points before running \texttt{least\_squares} (TRF method).
+
+\subsubsection{Results}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Interpretation} \\
+\midrule
+$\beta_0$ & 0.012309 & Long-term level ($\approx 1.23\%$) \\
+$\beta_1$ & 0.007979 & Slope \\
+$\beta_2$ & $-$0.011718 & First curvature \\
+$\beta_3$ & 0.076372 & Second curvature \\
+$\tau_1$  & 4.751 years & \\
+$\tau_2$  & 14.768 years & \\
+\midrule
+RMSE            & 0.033 bps & \\
+Max abs.\ error & 0.060 bps & \\
+\bottomrule
+\end{tabular}
+\caption{NSS calibrated parameters -- ECB AAA curve, 05/03/2026}
+\end{table}
+
+The fit is very good: the RMSE on spot rates is around $3.3 \times 10^{-5}$ in decimal, which is about $0.033$ basis points. The market ZCB price is $P^M(0,T) = e^{-T \cdot z^{\text{NSS}}(T)}$.
+
+The parameters paint a consistent picture of the ECB curve on that date. The long-term level $\beta_0 \approx 1.23\%$ is relatively low, reflecting an environment where long-run rate expectations remain contained. The positive slope $\beta_1 > 0$ confirms that the curve is upward-sloping: short rates are below long rates, which is the normal shape. The dominant feature is $\beta_3 = 0.076$, by far the largest coefficient, which creates a pronounced hump around $\tau_2 \approx 15$ years — this is what gives the ECB AAA curve its characteristic belly in the intermediate maturities. The negative $\beta_2$ introduces a slight concavity at shorter maturities, consistent with the compression of spreads in the 1--5 year segment.
+
+\subsubsection{Determination of $\theta(t)$}
+
+For Hull-White to exactly fit the initial yield curve, $\theta(t)$ must be chosen so that the model-implied ZCB prices match the market at all maturities: $P^{\text{model}}(0,T) = P^M(0,T)$ for all $T$.
+
+Under Hull-White, the ZCB price has the affine form $P(0,T) = \mathcal{A}(0,T)\,e^{-\mathcal{B}(0,T)\,r_0}$. Taking $-\frac{1}{T}\ln P(0,T)$ and differentiating with respect to $T$ gives the model-implied instantaneous forward rate $f^{\text{model}}(0,T)$. Matching it to the market forward rate $f^M(0,T)$ leads to the condition:
+\begin{equation}
+f^{\text{model}}(0,T) = f^M(0,T) \quad \forall\, T > 0
+\end{equation}
+The model-implied forward rate satisfies the Riccati-type equation:
+\begin{equation}
+\frac{\partial f^{\text{model}}(0,T)}{\partial T} = \theta(T) - a\,f^{\text{model}}(0,T) - \frac{\sigma^2}{2}\,\mathcal{B}(0,T)^2 \cdot \frac{\partial}{\partial T}\mathcal{B}(0,T)^{-1}
+\end{equation}
+Using $\mathcal{B}(0,T) = (1-e^{-aT})/a$, one computes $\frac{\partial}{\partial T}[\mathcal{B}(0,T)^2] = 2\mathcal{B}(0,T)\,e^{-aT}$, so:
+\begin{equation}
+\frac{\sigma^2}{2} \cdot 2\mathcal{B}(0,T)\,e^{-aT} = \frac{\sigma^2}{a}\left(1 - e^{-aT}\right)e^{-aT} = \frac{\sigma^2}{2a}\frac{\partial}{\partial T}\!\left(1-e^{-2aT}\right)
+\end{equation}
+Setting $f^{\text{model}}(0,T) = f^M(0,T)$ and solving for $\theta(T)$ then gives:
+\begin{equation}
+\boxed{\theta(t) = \frac{\partial f^M(0,t)}{\partial t} + a\, f^M(0,t) + \frac{\sigma^2}{2a}\left(1 - e^{-2at}\right)}
+\end{equation}
+The three terms have a clear interpretation: the first corrects for the slope of the forward curve, the second accounts for mean reversion pulling the rate back, and the third is a convexity adjustment from the stochastic volatility. As a sanity check: at $t=0$, we get $r(0) = f^M(0,0) = 2.03\%$ and $\theta(0) = 0.38\%$, consistent with a positively sloped yield curve.
+
+% ===== SECTION 2 =====
+\section{Multi-Measure Monte Carlo Pricing}
+
+\subsection{Swaption Description}
+
+We price a European payer swaption: exercise date $T = 2$ years, 10-year underlying swap with annual payments at $T_1 = 3, \ldots, T_{10} = 12$, strike $K = 2\%$, $\delta_i = 1$. The payoff at $T$ is:
+\begin{equation}
+V_T = A(T) \cdot \max\!\left(S(T) - K,\, 0\right)
+\end{equation}
+where $A(T) = \sum_{i=1}^{10} P(T, T+i)$ and $S(T) = (1 - P(T, T_{10})) / A(T)$.
+
+\subsection{Hull-White Affine Bond Formula}
+
+ZCB prices under Hull-White have the affine form $P(t,T) = \mathcal{A}(t,T)\,e^{-\mathcal{B}(t,T)\,r_t}$, with:
+\begin{align}
+\mathcal{B}(t,T) &= \frac{1-e^{-a(T-t)}}{a}, \qquad
+\mathcal{A}(t,T) = \frac{P^M(0,T)}{P^M(0,t)} \exp\!\left(\mathcal{B}(t,T)\, f^M(0,t) - \frac{\sigma^2}{4a}(1-e^{-2at})\,\mathcal{B}(t,T)^2\right)
+\end{align}
+
+\subsection{Exact Simulation Scheme}
+
+Under $\Q$ and $\Q^T$, the short-rate SDE has a known closed-form transition, so we can simulate each step exactly without any Euler approximation:
+\begin{equation}
+r_{t+\Delta t} = r_t\, e^{-a\Delta t} + \underbrace{\int_t^{t+\Delta t} \theta^\star(s)\, e^{-a(t+\Delta t - s)}\diff s}_{\mu_i \text{ (precomputed via \texttt{quad})}} + \sigma\sqrt{\frac{1-e^{-2a\Delta t}}{2a}} \cdot Z_i, \quad Z_i \sim \mathcal{N}(0,1)
+\end{equation}
+Under $\Q$, the discount factor $e^{-\int_0^T r_s\diff s}$ is approximated by the trapezoidal rule. This introduces a quadrature error of order $O(\Delta t^2)$, which is negligible compared to Monte Carlo noise at any reasonable step count.
+
+\subsection{Risk-Neutral Measure $\Q$}
+
+\textbf{Numeraire:} bank account $B_t$. \textbf{Drift:} $\theta^\star = \theta(t)$. \textbf{Pricing:} $V_0 = \E^{\Q}[e^{-\int_0^T r_s\diff s} V_T]$.
+
+\begin{algorithm}[H]
+\caption{Monte Carlo under $\Q$ (exact scheme)}
+\begin{algorithmic}[1]
+\State Precompute $\mu_i = \int_{t_i}^{t_{i+1}} \theta(s)\,e^{-a(t_{i+1}-s)}\diff s$ for all $i$
+\State Initialize $r_0^{(k)} = f^M(0,0)$
+\For{$i = 0, \ldots, n_{\text{steps}}-1$}
+    \State $r_{i+1}^{(k)} \leftarrow r_i^{(k)}\,e^{-a\Delta t} + \mu_i + \text{vol}\cdot Z_i^{(k)}$; \quad $I^{(k)} \mathrel{+}= \tfrac{1}{2}(r_i^{(k)} + r_{i+1}^{(k)})\,\Delta t$
+\EndFor
+\State $\hat{V}_0 = \frac{1}{N}\sum_k e^{-I^{(k)}} \cdot A(r_T^{(k)})\cdot\max(S(r_T^{(k)})-K, 0)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{T-Forward Measure $\Q^T$}
+
+\textbf{Numeraire:} ZCB $P(t,T)$. Under $\Q^T$, the numeraire is $P(t,T)$, so the Radon-Nikodym density is:
+\begin{equation}
+\frac{\diff\Q^T}{\diff\Q}\bigg|_t = \frac{P(t,T)/P(0,T)}{B_t} = \frac{P(t,T)}{P(0,T)\,B_t}
+\end{equation}
+In the Hull-White model, $P(t,T) = \mathcal{A}(t,T)\,e^{-\mathcal{B}(t,T)\,r_t}$, so by Itô's lemma:
+\begin{equation}
+\diff\ln P(t,T) = \left(\ldots\right)\diff t - \mathcal{B}(t,T)\,\sigma\,\diff W_t^{\Q}
+\end{equation}
+The Girsanov kernel is therefore $\lambda(t) = -\sigma\,\mathcal{B}(t,T)$, and the new Brownian motion under $\Q^T$ is:
+\begin{equation}
+\diff W_t^{\Q^T} = \diff W_t^{\Q} + \sigma\,\mathcal{B}(t,T)\,\diff t
+\end{equation}
+Substituting into the $\Q$-dynamics of $r_t$ gives:
+\begin{align}
+\diff r_t &= (\theta(t) - a\,r_t)\diff t + \sigma\,\diff W_t^{\Q} \\
+          &= \bigl(\theta(t) - a\,r_t - \sigma^2\,\mathcal{B}(t,T)\bigr)\diff t + \sigma\,\diff W_t^{\Q^T}
+\end{align}
+The drift correction $-\sigma^2\,\mathcal{B}(t,T)$ is what we called $\theta^\star(s) - \theta(s)$. Because $\mathcal{B}(t,T)$ is deterministic, this term can be precomputed, which is why the exact simulation scheme still applies under $\Q^T$.
+
+The main advantage of this measure change is practical: since $P(t,T)$ is the numeraire, the price formula simplifies to:
+\begin{equation}
+V_0 = P^M(0,T) \cdot \E^{\Q^T}[V_T]
+\end{equation}
+There is no stochastic discount factor to simulate — the randomness is entirely absorbed into the drift of $r_t$.
+
+\begin{algorithm}[H]
+\caption{Monte Carlo under $\Q^T$ (exact scheme)}
+\begin{algorithmic}[1]
+\State Precompute $\mu_i^T = \int_{t_i}^{t_{i+1}} (\theta(s) - \sigma^2 \mathcal{B}(s,T))\,e^{-a(t_{i+1}-s)}\diff s$
+\State Simulate paths; \quad $\hat{V}_0 = P^M(0,T) \cdot \frac{1}{N}\sum_k V_T^{(k)}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Annuity Measure $\Q^A$}
+
+\textbf{Numeraire:} annuity $A_{n,m}(t) = \sum_j \tau_j P(t,T_j)$. Under this measure, the forward swap rate $S(t)$ is a martingale, which is natural for swaption pricing. The required drift correction is:
+\begin{equation}
+\theta^\star(s) = \theta(s) - \sigma^2 \sum_{j} \frac{\delta\, P(s,T_j)}{A(s,r_s)}\,\mathcal{B}(s,T_j)
+\end{equation}
+Since this term depends on the current path of $r_s$, it cannot be precomputed and requires an Euler step. The price is then $V_0 = A(0)\cdot\E^{\Q^A}[\max(S(T)-K,0)]$.
+
+\begin{algorithm}[H]
+\caption{Monte Carlo under $\Q^A$ (hybrid Euler scheme)}
+\begin{algorithmic}[1]
+\For{$i = 0, \ldots, n_{\text{steps}}-1$}
+    \State Compute $P(t_i, T_j, r_i^{(k)})$ for all $j$, all $k$
+    \State $c_i^{(k)} \leftarrow \sigma^2 \sum_j \frac{\delta\, P(t_i,T_j)}{A(t_i,r_i^{(k)})} \mathcal{B}(t_i,T_j)$
+    \State $r_{i+1}^{(k)} \leftarrow r_i^{(k)} + (\theta(t_i) - a\,r_i^{(k)} - c_i^{(k)})\,\Delta t + \sigma\sqrt{\Delta t}\, Z_i^{(k)}$
+\EndFor
+\State $\hat{V}_0 = A(0)\cdot\frac{1}{N}\sum_k \max(S_T^{(k)} - K, 0)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Monte Carlo comparison across numeraires}
+
+We price the same payer swaption under the three measures $Q$, $Q^T$ and $Q^A$.
+In theory, the arbitrage-free price should be invariant to the choice of numeraire.
+Our Monte Carlo results confirm this property:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Measure & Price & Std. Error & Variance of estimator \\
+\midrule
+$Q$   & 0.099006 & 0.000158 & $2.4964\times 10^{-8}$ \\
+$Q^T$ & 0.099004 & 0.000161 & $2.5921\times 10^{-8}$ \\
+$Q^A$ & 0.099001 & 0.000174 & $3.0276\times 10^{-8}$ \\
+\bottomrule
+\end{tabular}
+\caption{Monte Carlo prices under the three numeraires. The variance of the estimator is computed as $(\text{Std. Error})^2$.}
+\end{table}
+
+The three prices are almost identical, which is consistent with change-of-numeraire theory:
+changing the numeraire does not change the theoretical price in an arbitrage-free framework.
+The differences therefore come from Monte Carlo efficiency rather than from valuation inconsistency.
+
+The main difference appears in the estimator variance. In our implementation, the risk-neutral
+measure $Q$ produces the smallest standard error, followed by $Q^T$, while $Q^A$ gives the
+largest one. At first sight, this may seem surprising, since under the annuity measure the
+swaption payoff takes the clean form
+\[
+V_0 = A(0)\,\mathbb{E}^{Q^A}\big[(S(T)-K)^+\big].
+\]
+However, the observed variance ranking is not determined by the numeraire alone.
+
+A first reason is that under $Q$, the simulated quantity contains both the random discount factor
+and the random annuity term. These terms may partially offset the variability of the option payoff:
+when rates increase, the swap rate and the payoff tend to increase, while discount factors and bond
+prices tend to decrease. This compensation effect can reduce the overall dispersion of the Monte Carlo
+integrand.
+
+A second and more important reason comes from the numerical implementation. Under $Q$ and $Q^T$,
+the short-rate dynamics remain Gaussian affine and admit an exact discretization. Under $Q^A$,
+by contrast, the drift correction depends on the current annuity weights, which are themselves
+functions of zero-coupon bond prices and therefore of the current short rate. The process is no
+longer affine Gaussian, so an Euler discretization must be used. As a consequence, the empirical
+standard error under $Q^A$ reflects both the numeraire choice and an additional discretization effect.
+
+Therefore, the results should be interpreted as follows: the equality of prices validates the
+change-of-numeraire framework, while the variance ranking mainly shows that, in our implementation,
+the risk-neutral measure is numerically the most efficient. This does not mean that $Q$ is
+theoretically always the best numeraire, but rather that it is the most stable one in the present
+short-rate simulation framework.
+% ===== SECTION 3 =====
+\section{Numerical Implementation: Trinomial Trees}
+
+\subsection{Construction of the Hull-White Trinomial Tree}
+
+Following Hull \& White (1993), we build a recombining trinomial tree on the centered process $x_t = r_t - \alpha(t)$, which satisfies $\diff x_t = -a\,x_t\,\diff t + \sigma\,\diff W_t$. The node spacing is:
+\begin{equation}
+\Delta x = \sigma\sqrt{3\,\Delta t}
+\end{equation}
+This choice minimizes discretization error. Beyond $j_{\max} = \lceil 0.184 / (a\,\Delta t) \rceil$ nodes from the center, the branching geometry is modified to keep all probabilities positive.
+
+\subsubsection{Transition probabilities}
+
+At a standard interior node $j$, setting $\eta = a\,j\,\Delta t$:
+\begin{equation}
+p_u = \frac{1}{6} + \frac{\eta^2 + \eta}{2}, \qquad p_m = \frac{2}{3} - \eta^2, \qquad p_d = \frac{1}{6} + \frac{\eta^2 - \eta}{2}
+\end{equation}
+At boundary nodes $j = \pm j_{\max}$, the branching direction shifts by $\mp 1$ to keep the tree within bounds while preserving the first two conditional moments.
+
+\subsubsection{Node-shifting $\alpha(t)$ to fit the yield curve}
+
+The shift $\alpha(t_i)$ is computed recursively using the Arrow-Debreu prices $Q(i,j)$ — the time-0 value of a security that pays 1 at node $(i,j)$ and 0 elsewhere. The no-arbitrage condition gives:
+\begin{equation}
+\alpha(t_i) = \frac{1}{\Delta t}\left[\ln\!\sum_j Q(i,j)\,e^{-j\,\Delta x\,\Delta t} - \ln P^M(0, t_{i+1})\right]
+\end{equation}
+With this choice, $r(t_i, j) = \alpha(t_i) + j\,\Delta x$ exactly matches the market ZCB prices at each step.
+
+\subsubsection{Yield curve fit verification}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccc}
+\toprule
+\textbf{Maturity} & \textbf{$P^{\text{NSS}}(0,T)$} & \textbf{$P^{\text{tree}}(0,T)$} & \textbf{Error (bps)} \\
+\midrule
+0.5  & 0.98978 & 0.98978 & $<0.001$ \\
+1.0  & 0.97909 & 0.97909 & $<0.001$ \\
+2.0  & 0.95757 & 0.95757 & $<0.001$ \\
+5.0  & 0.89111 & 0.89111 & $<0.001$ \\
+10.0 & 0.75390 & 0.75390 & $<0.001$ \\
+\bottomrule
+\end{tabular}
+\caption{Tree vs.\ NSS market ZCB prices ($N = 400$)}
+\end{table}
+
+The tree fits the NSS curve to machine precision. A few representative maturities are shown; the full grid was verified numerically.
+
+\subsection{Swaption Pricing by Backward Induction}
+
+At the exercise date $T_{\text{ex}}$, each node $j$ has a known short rate $r(T_{\text{ex}}, j) = \alpha(T_{\text{ex}}) + j\,\Delta x$. We compute the swaption payoff at each node using the Hull-White ZCB formula:
+\begin{equation}
+V(T_{\text{ex}}, j) = A(T_{\text{ex}}, j)\cdot\max\!\left(S(T_{\text{ex}}, j) - K,\, 0\right)
+\end{equation}
+We then roll back from $i = i_{\text{ex}}$ to $i = 0$ using:
+\begin{equation}
+V(t_i, j) = e^{-r(t_i,j)\,\Delta t}\!\left[p_u V(t_{i+1}, j_u) + p_m V(t_{i+1}, j_m) + p_d V(t_{i+1}, j_d)\right]
+\end{equation}
+
+\begin{algorithm}[H]
+\caption{Trinomial Tree Pricing}
+\begin{algorithmic}[1]
+\State Build tree: compute $\alpha(t_i)$ and Arrow-Debreu prices $Q(i,j)$ for $i = 0,\ldots,N$
+\State At $i = i_{\text{ex}}$: compute $V(T_{\text{ex}}, j) = A_j \cdot \max(S_j - K, 0)$ using $P_{\text{HW}}$
+\For{$i = i_{\text{ex}}-1$ down to $0$}
+    \For{each node $j$ at step $i$}
+        \State $V(t_i,j) \leftarrow e^{-r(t_i,j)\Delta t}(p_u V_{j_u} + p_m V_{j_m} + p_d V_{j_d})$
+    \EndFor
+\EndFor
+\State \Return $V(0, 0)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Comparison with Monte Carlo Results}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Price} & \textbf{$\pm 2\sigma$} & \textbf{Rel.\ diff vs.\ tree} \\
+\midrule
+Trinomial Tree ($N=400$) & 0.098969 & N/A      & --- \\
+Risk-Neutral MC ($\Q$)   & 0.099006 & 0.000316 & $+0.037\%$ \\
+Forward MC ($\Q^T$)      & 0.099004 & 0.000323 & $+0.035\%$ \\
+Annuity MC ($\Q^A$)      & 0.099001 & 0.000348 & $+0.033\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Swaption price: trinomial tree vs.\ Monte Carlo (50,000 paths, 400 steps)}
+\end{table}
+
+All four results are within $0.04\%$ of each other. The small gap between the tree and the MC prices is well inside the MC confidence intervals, so there is no evidence of a systematic bias in either method.
+
+\subsection{Convergence Analysis}
+
+\subsubsection{Trinomial tree convergence}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{rcc}
+\toprule
+\textbf{N} & \textbf{Price} & \textbf{$\Delta$ vs $N=400$} \\
+\midrule
+25  & 0.100330 & $+0.001361$ \\
+50  & 0.099337 & $+0.000368$ \\
+75  & 0.099021 & $+0.000052$ \\
+100 & 0.099536 & $+0.000567$ \\
+150 & 0.099133 & $+0.000164$ \\
+200 & 0.098932 & $-0.000037$ \\
+300 & 0.098959 & $-0.000010$ \\
+400 & 0.098969 & ---          \\
+\bottomrule
+\end{tabular}
+\caption{Trinomial tree convergence with respect to number of time steps $N$}
+\end{table}
+
+The price stabilizes around $N=200$--$300$, with an error that becomes small as the grid is refined. The non-monotone jump at $N=100$ is typical of trinomial trees: it happens when the exercise date falls between grid points, which changes the local geometry of the backward induction.
+
+\subsubsection{Monte Carlo convergence}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{rcccc}
+\toprule
+\textbf{$N_{\text{steps}}$} & \textbf{$\Delta t$} & \textbf{Price (MC)} & \textbf{StdErr} \\
+\midrule
+ 25  & 0.0800 & 0.098685 & 0.000158 \\
+ 50  & 0.0400 & 0.098836 & 0.000158 \\
+100  & 0.0200 & 0.098894 & 0.000158 \\
+200  & 0.0100 & 0.098914 & 0.000157 \\
+400  & 0.0050 & 0.099006 & 0.000158 \\
+600  & 0.0033 & 0.098897 & 0.000158 \\
+\bottomrule
+\end{tabular}
+\caption{Monte Carlo convergence under $\Q$ (50,000 paths) with respect to number of steps}
+\end{table}
+
+The MC price barely moves as we refine the time grid — the standard error is essentially constant, and all prices fall within each other's confidence intervals. This is consistent with the exact transition scheme: there is no SDE discretization to refine away, so finer grids only add computation time without improving accuracy.
+
+\subsubsection{Comparison of convergence behavior}
+
+The two methods converge very differently. The MC price is stable from $N_{\text{steps}} = 25$ onward because the short-rate transition is simulated exactly — there is simply no discretization error to reduce. Residual fluctuations are pure Monte Carlo noise of order $O(1/\sqrt{N_{\text{paths}}})$. The tree price, by contrast, oscillates at coarse grid sizes, but the oscillation amplitude decreases as the grid is refined, before settling around $N \approx 200$. In terms of speed, the tree is much faster: it gives a stable result in under 0.5 seconds, while 50,000 MC paths take several seconds.
+
+\subsection{Sensitivity to the Mean-Reversion Parameter $a$}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{rcc}
+\toprule
+\textbf{$a$} & \textbf{Price} & \textbf{$\Delta$ vs calibrated} \\
+\midrule
+0.01  & 0.098995 & $+0.000026$ \\
+0.05  & 0.098975 & $+0.000006$ \\
+0.10  & 0.098963 & $-0.000006$ \\
+0.15  & 0.098975 & $+0.000006$ \\
+0.20  & 0.099018 & $+0.000049$ \\
+0.30  & 0.099225 & $+0.000256$ \\
+0.40  & 0.099288 & $+0.000319$ \\
+0.50  & 0.098401 & $-0.000568$ \\
+0.60  & 0.097644 & $-0.001325$ \\
+0.70  & 0.098098 & $-0.000871$ \\
+\bottomrule
+\end{tabular}
+\caption{Swaption price sensitivity to $a$ (trinomial tree, $N=400$, $\sigma$ fixed)}
+\end{table}
+
+For $a \lesssim 0.40$, the price barely moves — deviations stay below 0.3\%. There is a local maximum around $a \approx 0.35$--$0.40$, after which the price starts to fall.
+
+\textbf{Interpretation.} A higher $a$ means the short rate reverts faster toward the path imposed by $\theta(t)$. This compresses the distribution of $r_T$, which tends to reduce the probability of the swaption being deep in the money. At the same time, $\theta(t)$ re-adjusts to keep the yield curve fit, partially cancelling that effect. Near the calibrated value $a = 0.1367$, the price is quite flat, which is reassuring: small errors in estimating $a$ do not significantly affect the result. For $a \gtrsim 0.45$ the price drops more sharply, but this region should be interpreted with caution — part of the behavior is likely numerical, since large $a$ values reduce $j_{\max} = \lceil 0.184/(a\,\Delta t)\rceil$ and make the tree coarser.
+
+% ===== SECTION 4 =====
+\section{Critical Analysis}
+
+\subsection{The Assumption $P = \Q$ on $(a, \sigma)$}
+
+We assumed throughout that $(a, \sigma)$ are the same under the historical measure $P$ and the risk-neutral measure $\Q$. This is a convenient simplification — it lets us estimate the parameters from historical data without needing market option prices — but it is not necessarily true. In practice, interest rate risk premia create a wedge between $P$ and $\Q$. Under $P$:
+\begin{equation}
+\diff r_t = (\theta^P(t) - a\,r_t)\diff t + \sigma\,\diff W_t^P
+\end{equation}
+Girsanov's theorem gives $\diff W_t^P = \diff W_t^{\Q} + \lambda(t)\diff t$. By fixing $a$ and $\sigma$ across measures, we are absorbing all of the measure change into $\theta(t)$ and ignoring the possibility that the mean-reversion speed itself differs between the two worlds. This can distort long-maturity option prices when the market prices a significant volatility risk premium.
+
+\subsection{Historical vs.\ Market-Implied Volatility}
+
+The $\sigma = 0.0067$ we estimated is a \textit{historical volatility} — it reflects how much the \texteuro STR actually moved over the past six years. \textit{Implied volatility} is something different: it is the value of $\sigma$ that makes the Hull-White formula match an observed market swaption price (via the Jamshidian decomposition). The two need not agree. Implied volatility incorporates market expectations and a risk premium; historical volatility does not. In stress periods, implied volatility can be significantly higher, which means a model calibrated on historical data will tend to underprice options. Our price of $0.0990$ should therefore be read as a lower bound relative to what the market might quote.
+
+\subsection{Calibration to Market Swaption Prices}
+
+If market swaption prices were available, we would calibrate very differently:
+\begin{enumerate}
+    \item \textbf{Input:} a grid of implied Black volatilities across exercise maturities and swap tenors (the ``vol cube'').
+    \item \textbf{Target:} the Hull-White analytical swaption price (Jamshidian decomposition) as a function of $(a, \sigma)$.
+    \item \textbf{Fit:} minimize the squared pricing error across the swaption grid.
+    \item \textbf{Output:} risk-neutral $(a, \sigma)$ that best match observed market prices.
+\end{enumerate}
+This gives parameters that are directly consistent with market option prices, which is what matters for hedging and pricing derivatives. The trade-off is that we lose the connection to historical dynamics. A natural extension is to allow $\sigma = \sigma(t)$, which adds enough degrees of freedom to fit the volatility surface across maturities — this is the standard approach in practice.
+
+\end{document}
